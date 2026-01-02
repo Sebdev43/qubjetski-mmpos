@@ -2,6 +2,18 @@
 
 Auto-updating mmpOS package for [Jetski Qubic Pool](https://qubic.jetskipool.ai/) PPLNS miner.
 
+## Disclaimer
+
+⚠️ **This is a personal project** created solely for my own use to easily deploy the Jetski Qubic miner on mmpOS.
+
+- I am **not affiliated** with Jetski Pool or the original miner developers
+- I do **not own** any of the mining software included in this package
+- This repository only provides **mmpOS integration scripts** and automated packaging
+- All mining software is downloaded directly from the official [Jetski-Qubic-Pool](https://github.com/jtskxx/Jetski-Qubic-Pool) releases
+- For support regarding the miner itself, please refer to the official Jetski channels
+
+**Use at your own risk.**
+
 ## Download URL
 
 ```
