@@ -1,12 +1,11 @@
 #!/bin/bash
-# mmpOS launcher for qubjetski
+# mmpOS launcher for qubjetski PPLNS
 
 WALLET=""
 ALIAS=""
 GPU=false
 CPU=false
 CPU_THREADS=$(nproc)
-PPLNS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -31,7 +30,6 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --pplns)
-            PPLNS=true
             shift
             ;;
         *)
@@ -57,13 +55,21 @@ BASE_SETTINGS=$(jq -r '.ClientSettings' appsettings_global.json)
 
 POOL_URL="wss://pplns.jtskxpool.ai/ws/${WALLET}"
 
+IDLE_USER="${WALLET}.${ALIAS}"
+
 SETTINGS=$(echo "$BASE_SETTINGS" | jq \
     --arg pool "$POOL_URL" \
     --arg alias "$ALIAS" \
     --argjson gpu "$GPU" \
     --argjson cpu "$CPU" \
     --argjson threads "$CPU_THREADS" \
-    '.poolAddress = $pool | .alias = $alias | .trainer.gpu = $gpu | .trainer.cpu = $cpu | .trainer.cpuThreads = $threads')
+    --arg idle_user "$IDLE_USER" \
+    '.poolAddress = $pool |
+     .alias = $alias |
+     .trainer.gpu = $gpu |
+     .trainer.cpu = $cpu |
+     .trainer.cpuThreads = $threads |
+     .idling.arguments = (.idling.arguments | gsub("JETSKI\\.WALLET"; $idle_user) | gsub("WALLET"; $idle_user))')
 
 if [[ "$CPU" == "true" && "$GPU" == "false" ]]; then
     SETTINGS=$(echo "$SETTINGS" | jq 'del(.idling)')
@@ -72,14 +78,15 @@ fi
 echo "{\"ClientSettings\":$SETTINGS}" | jq . > appsettings.json
 
 echo "=========================================="
-echo "  QUBJETSKI - mmpOS Launcher"
+echo "  QUBJETSKI PPLNS - mmpOS"
 echo "=========================================="
 echo "Wallet: $WALLET"
 echo "Alias: $ALIAS"
 echo "GPU: $GPU | CPU: $CPU (threads: $CPU_THREADS)"
 echo "Pool: $POOL_URL"
+echo "Idle mining: qhash via wildrig-multi"
 echo "=========================================="
 
-chmod +x qli-Client 2>/dev/null
+chmod +x qli-Client wildrig-multi 2>/dev/null
 
 exec ./qli-Client
