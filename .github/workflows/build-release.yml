@@ -1,0 +1,76 @@
+name: Build and Release mmpOS Package
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check upstream for updates
+        id: check_upstream
+        run: |
+          UPSTREAM_URL="https://github.com/jtskxx/Jetski-Qubic-Pool/releases/download/latest/qubjetski.PPLNS-latest.tar.gz"
+
+          # Get upstream file info
+          UPSTREAM_INFO=$(curl -sI -L "$UPSTREAM_URL" | grep -i "content-length\|last-modified\|etag" | tr -d '\r')
+          UPSTREAM_HASH=$(echo "$UPSTREAM_INFO" | md5sum | cut -d' ' -f1)
+
+          echo "upstream_hash=$UPSTREAM_HASH" >> $GITHUB_OUTPUT
+          echo "Upstream hash: $UPSTREAM_HASH"
+
+      - name: Build mmpOS package
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Get upstream version info
+        id: version_info
+        run: |
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+
+      - name: Delete existing latest release
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create/Update Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          name: "qubjetski mmpOS Package (Auto-Updated)"
+          body: |
+            ## qubjetski mmpOS Package
+
+            Auto-built from upstream [Jetski-Qubic-Pool](https://github.com/jtskxx/Jetski-Qubic-Pool) releases.
+
+            **Last updated:** ${{ steps.version_info.outputs.build_date }}
+
+            ### Installation
+
+            Use this URL in mmpOS custom miner:
+            ```
+            https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz
+            ```
+
+            ### Includes
+            - Latest qubjetski PPLNS miner
+            - mmpOS integration files (mmp-stats.sh, mmp-external.conf)
+          files: qubjetski-latest_mmpos.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
