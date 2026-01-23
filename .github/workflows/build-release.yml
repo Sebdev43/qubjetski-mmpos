@@ -3,8 +3,14 @@ name: Build and Release mmpOS Package
 on:
   push:
     branches: [main]
+    paths:
+      - 'build.sh'
+      - 'mmp-*.sh'
+      - 'mmp-*.conf'
+      - 'start_mmpos.sh'
+      - '.github/workflows/**'
   schedule:
-    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,36 +24,63 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check upstream for updates
-        id: check_upstream
+      - name: Get upstream file hash
+        id: upstream
         run: |
           UPSTREAM_URL="https://github.com/jtskxx/Jetski-Qubic-Pool/releases/download/latest/qubjetski.PPLNS-latest.tar.gz"
+          
+          # Télécharger et hasher le CONTENU réel
+          curl -sL "$UPSTREAM_URL" -o /tmp/upstream.tar.gz
+          HASH=$(sha256sum /tmp/upstream.tar.gz | cut -d' ' -f1)
+          
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "📦 Upstream hash: $HASH"
 
-          # Get upstream file info
-          UPSTREAM_INFO=$(curl -sI -L "$UPSTREAM_URL" | grep -i "content-length\|last-modified\|etag" | tr -d '\r')
-          UPSTREAM_HASH=$(echo "$UPSTREAM_INFO" | md5sum | cut -d' ' -f1)
+      - name: Get previous hash from release
+        id: previous
+        run: |
+          # Extraire le hash stocké dans la release précédente
+          PREV_HASH=$(gh release view latest --json body -q '.body' 2>/dev/null | grep -oP '(?<=Upstream SHA256: `)[a-f0-9]+' || echo "none")
+          
+          echo "hash=$PREV_HASH" >> $GITHUB_OUTPUT
+          echo "📋 Previous hash: $PREV_HASH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          echo "upstream_hash=$UPSTREAM_HASH" >> $GITHUB_OUTPUT
-          echo "Upstream hash: $UPSTREAM_HASH"
+      - name: Check if update needed
+        id: check
+        run: |
+          echo "Comparing hashes..."
+          echo "  Upstream: ${{ steps.upstream.outputs.hash }}"
+          echo "  Previous: ${{ steps.previous.outputs.hash }}"
+          
+          if [ "${{ steps.upstream.outputs.hash }}" != "${{ steps.previous.outputs.hash }}" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "🔄 CHANGEMENT DÉTECTÉ - rebuild nécessaire"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "✅ Aucun changement - skip build"
+          fi
 
       - name: Build mmpOS package
+        if: steps.check.outputs.changed == 'true'
         run: |
           chmod +x build.sh
           ./build.sh
 
-      - name: Get upstream version info
-        id: version_info
-        run: |
-          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
-          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+      - name: Get build date
+        if: steps.check.outputs.changed == 'true'
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
 
-      - name: Delete existing latest release
-        run: |
-          gh release delete latest --yes --cleanup-tag || true
+      - name: Delete existing release
+        if: steps.check.outputs.changed == 'true'
+        run: gh release delete latest --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create/Update Release
+      - name: Create Release
+        if: steps.check.outputs.changed == 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: latest
@@ -57,7 +90,8 @@ jobs:
 
             Auto-built from upstream [Jetski-Qubic-Pool](https://github.com/jtskxx/Jetski-Qubic-Pool) releases.
 
-            **Last updated:** ${{ steps.version_info.outputs.build_date }}
+            **Last updated:** ${{ steps.date.outputs.date }}
+            **Upstream SHA256:** `${{ steps.upstream.outputs.hash }}`
 
             ### Installation
 
@@ -69,8 +103,20 @@ jobs:
             ### Includes
             - Latest qubjetski PPLNS miner
             - mmpOS integration files (mmp-stats.sh, mmp-external.conf)
+            - Supports CPU and GPU mining
           files: qubjetski-latest_mmpos.tar.gz
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "### Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.changed }}" == "true" ]; then
+            echo "✅ **Package rebuilt and released**" >> $GITHUB_STEP_SUMMARY
+            echo "- New upstream hash: \`${{ steps.upstream.outputs.hash }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏭️ **No update needed - skipped build**" >> $GITHUB_STEP_SUMMARY
+            echo "- Upstream unchanged since last build" >> $GITHUB_STEP_SUMMARY
+          fi
