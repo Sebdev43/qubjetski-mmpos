@@ -13,6 +13,11 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+# Prevent parallel runs that could race on the 'latest' release
+concurrency:
+  group: release-latest
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -21,29 +26,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Pin to SHA to prevent supply chain attacks via tag mutation
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Get upstream file hash
         id: upstream
         run: |
-          UPSTREAM_URL="https://github.com/jtskxx/Jetski-Qubic-Pool/releases/download/latest/qubjetski.PPLNS-latest.tar.gz"
-          
-          # Télécharger et hasher le CONTENU réel
-          curl -sL "$UPSTREAM_URL" -o /tmp/upstream.tar.gz
+          curl -sfL --retry 3 --retry-delay 5 "$UPSTREAM_URL" -o /tmp/upstream.tar.gz
+
+          # Validate: must be a valid gzip file
+          if ! file /tmp/upstream.tar.gz | grep -q 'gzip compressed'; then
+            echo "::error::Downloaded file is not a valid gzip archive"
+            exit 1
+          fi
+
+          # Validate: reasonable file size (between 1MB and 500MB)
+          FILE_SIZE=$(stat --format=%s /tmp/upstream.tar.gz)
+          if [ "$FILE_SIZE" -lt 1048576 ] || [ "$FILE_SIZE" -gt 524288000 ]; then
+            echo "::error::Upstream file size suspicious: ${FILE_SIZE} bytes"
+            exit 1
+          fi
+
           HASH=$(sha256sum /tmp/upstream.tar.gz | cut -d' ' -f1)
-          
-          echo "hash=$HASH" >> $GITHUB_OUTPUT
-          echo "📦 Upstream hash: $HASH"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Upstream hash: $HASH (${FILE_SIZE} bytes)"
+        env:
+          UPSTREAM_URL: https://github.com/jtskxx/Jetski-Qubic-Pool/releases/download/latest/qubjetski.PPLNS-latest.tar.gz
 
       - name: Get previous hash from release
         id: previous
         run: |
-          # Extraire le hash stocké dans la release précédente
           PREV_HASH=$(gh release view latest --json body -q '.body' 2>/dev/null | grep -oP '(?<=Upstream SHA256: `)[a-f0-9]+' || echo "none")
-          
-          echo "hash=$PREV_HASH" >> $GITHUB_OUTPUT
-          echo "📋 Previous hash: $PREV_HASH"
+          echo "hash=$PREV_HASH" >> "$GITHUB_OUTPUT"
+          echo "Previous hash: $PREV_HASH"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -51,16 +67,20 @@ jobs:
         id: check
         run: |
           echo "Comparing hashes..."
-          echo "  Upstream: ${{ steps.upstream.outputs.hash }}"
-          echo "  Previous: ${{ steps.previous.outputs.hash }}"
-          
-          if [ "${{ steps.upstream.outputs.hash }}" != "${{ steps.previous.outputs.hash }}" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "🔄 CHANGEMENT DÉTECTÉ - rebuild nécessaire"
+          echo "  Upstream: $UPSTREAM_HASH"
+          echo "  Previous: $PREVIOUS_HASH"
+
+          if [ "$UPSTREAM_HASH" != "$PREVIOUS_HASH" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Update needed - rebuild triggered"
           else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "✅ Aucun changement - skip build"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No update needed - skipping build"
           fi
+        # Use env vars instead of ${{ }} interpolation to prevent script injection
+        env:
+          UPSTREAM_HASH: ${{ steps.upstream.outputs.hash }}
+          PREVIOUS_HASH: ${{ steps.previous.outputs.hash }}
 
       - name: Build mmpOS package
         if: steps.check.outputs.changed == 'true'
@@ -68,55 +88,101 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      - name: Get build date
+      - name: Verify built artifact
         if: steps.check.outputs.changed == 'true'
-        id: date
-        run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
+        run: |
+          ARTIFACT="qubjetski-latest_mmpos.tar.gz"
+
+          if [ ! -f "$ARTIFACT" ]; then
+            echo "::error::Build artifact not found: $ARTIFACT"
+            exit 1
+          fi
+
+          if ! file "$ARTIFACT" | grep -q 'gzip compressed'; then
+            echo "::error::Build artifact is not a valid gzip archive"
+            exit 1
+          fi
+
+          FILE_SIZE=$(stat --format=%s "$ARTIFACT")
+          if [ "$FILE_SIZE" -lt 1048576 ]; then
+            echo "::error::Build artifact too small: ${FILE_SIZE} bytes"
+            exit 1
+          fi
+
+          echo "Artifact verified: $ARTIFACT (${FILE_SIZE} bytes)"
 
       - name: Delete existing release
         if: steps.check.outputs.changed == 'true'
-        run: gh release delete latest --yes --cleanup-tag || true
+        run: gh release delete latest --yes --cleanup-tag 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create Release
+      # Use gh CLI directly instead of third-party action
+      # Fixes the draft bug and eliminates supply chain risk
+      - name: Create release
         if: steps.check.outputs.changed == 'true'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: latest
-          name: "qubjetski mmpOS Package (Auto-Updated)"
-          body: |
-            ## qubjetski mmpOS Package
+        run: |
+          BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M UTC')
 
-            Auto-built from upstream [Jetski-Qubic-Pool](https://github.com/jtskxx/Jetski-Qubic-Pool) releases.
+          gh release create latest \
+            --title "qubjetski mmpOS Package (Auto-Updated)" \
+            --notes "$(cat <<EOF
+          ## qubjetski mmpOS Package
 
-            **Last updated:** ${{ steps.date.outputs.date }}
-            **Upstream SHA256:** `${{ steps.upstream.outputs.hash }}`
+          Auto-built from upstream [Jetski-Qubic-Pool](https://github.com/jtskxx/Jetski-Qubic-Pool) releases.
 
-            ### Installation
+          **Last updated:** ${BUILD_DATE}
+          **Upstream SHA256:** \`${UPSTREAM_HASH}\`
 
-            Use this URL in mmpOS custom miner:
-            ```
-            https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz
-            ```
+          ### Installation
 
-            ### Includes
-            - Latest qubjetski PPLNS miner
-            - mmpOS integration files (mmp-stats.sh, mmp-external.conf)
-            - Supports CPU and GPU mining
-          files: qubjetski-latest_mmpos.tar.gz
-          draft: false
-          prerelease: false
+          Use this URL in mmpOS custom miner:
+          \`\`\`
+          https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz
+          \`\`\`
+
+          ### Includes
+          - Latest qubjetski PPLNS miner
+          - mmpOS integration files (mmp-stats.sh, mmp-external.conf)
+          - Supports CPU and GPU mining
+          EOF
+          )" \
+            --latest \
+            qubjetski-latest_mmpos.tar.gz
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_HASH: ${{ steps.upstream.outputs.hash }}
+
+      - name: Verify release is public
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          sleep 5
+          IS_DRAFT=$(gh release view latest --json isDraft -q '.isDraft')
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "::warning::Release created as draft, forcing publish..."
+            gh release edit latest --draft=false
+          fi
+
+          ASSET_COUNT=$(gh release view latest --json assets -q '.assets | length')
+          if [ "$ASSET_COUNT" -eq 0 ]; then
+            echo "::error::Release has no assets attached"
+            exit 1
+          fi
+
+          echo "Release verified: public with $ASSET_COUNT asset(s)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
-          echo "### Workflow Summary" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.check.outputs.changed }}" == "true" ]; then
-            echo "✅ **Package rebuilt and released**" >> $GITHUB_STEP_SUMMARY
-            echo "- New upstream hash: \`${{ steps.upstream.outputs.hash }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "### Workflow Summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CHANGED" = "true" ]; then
+            echo "**Package rebuilt and released**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- New upstream hash: \`${UPSTREAM_HASH}\`" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "⏭️ **No update needed - skipped build**" >> $GITHUB_STEP_SUMMARY
-            echo "- Upstream unchanged since last build" >> $GITHUB_STEP_SUMMARY
+            echo "**No update needed - skipped build**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Upstream unchanged since last build" >> "$GITHUB_STEP_SUMMARY"
           fi
+        env:
+          CHANGED: ${{ steps.check.outputs.changed }}
+          UPSTREAM_HASH: ${{ steps.upstream.outputs.hash }}
