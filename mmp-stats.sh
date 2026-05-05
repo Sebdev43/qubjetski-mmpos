@@ -78,8 +78,9 @@ build_output_from_api() {
 
     local gpu_lines
     gpu_lines=$(echo "$data" | jq -r '
-        .gpu.devices // {} |
+        .hashrate.devices // {} |
         to_entries |
+        map(select(.key | test("^(CUDA|OPENCL|ROCM|HIP)"; "i"))) |
         sort_by((.key | gsub("[^0-9]";"") | tonumber?) // 0) |
         .[] | .value
     ' 2>/dev/null)
