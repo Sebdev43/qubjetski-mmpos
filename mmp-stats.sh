@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
+# mmpOS stats adapter for qubjetski v3 client
 
 DEVICE_NUM=$1
 LOG_FILE=$2
-API_PORT=63005
 
-get_bus_ids() {
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APPSETTINGS="$SCRIPT_DIR/appsettings.json"
+
+API_BIND=$(jq -r '.api.bind // "127.0.0.1:17899"' "$APPSETTINGS" 2>/dev/null)
+[[ -z "$API_BIND" || "$API_BIND" == "null" ]] && API_BIND="127.0.0.1:17899"
+API_URL="http://${API_BIND}/summary"
+
+get_summary() {
+    local response
+    response=$(curl -s --connect-timeout 2 "$API_URL" 2>/dev/null)
+    if [[ -z "$response" ]] || ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        return 1
+    fi
+    echo "$response"
+}
+
+get_gpu_busids() {
     local vendor_id="$1"
     local gpu_info_json="/run/gpu-info.json"
-    local busids=()
+    local vendor
 
-    vendor_id=$(echo "$vendor_id" | tr -d '[:space:]')
     case "$vendor_id" in
         10de) vendor="nvidia" ;;
         1002) vendor="amd_sysfs" ;;
@@ -18,121 +33,109 @@ get_bus_ids() {
 
     local bus_ids
     bus_ids=$(jq -r ".device.GPU.${vendor}_details.busid[]" "$gpu_info_json" 2>/dev/null)
-
-    if [[ -z "$bus_ids" ]]; then
-        return 1
-    fi
+    [[ -z "$bus_ids" ]] && return 1
 
     while read -r bus_id; do
         local hex=${bus_id:5:2}
-        busids+=($((16#$hex)))
+        echo $((16#$hex))
     done <<< "$bus_ids"
-    echo "${busids[*]}"
 }
 
-get_stats_from_api() {
-    local api_response
-    api_response=$(curl -s --connect-timeout 2 "http://127.0.0.1:${API_PORT}/" 2>/dev/null)
+extract_log_hashrate() {
+    [[ -f "$LOG_FILE" ]] || return 1
+    local last_lines gpu_hs cpu_hs accepted rejected total
 
-    if [[ -z "$api_response" ]] || ! echo "$api_response" | jq . >/dev/null 2>&1; then
-        return 1
-    fi
+    last_lines=$(tail -200 "$LOG_FILE" 2>/dev/null)
 
-    echo "$api_response"
-}
-
-extract_hashrate_from_log() {
-    if [[ ! -f "$LOG_FILE" ]]; then
-        return 1
-    fi
-
-    local last_lines=$(tail -100 "$LOG_FILE" 2>/dev/null)
-
-    local gpu_hs=$(echo "$last_lines" | grep -oP '\[CUDA\].*?(\d+) avg it/s' | tail -1 | grep -oP '\d+(?= avg it/s)')
-
-    local cpu_hs=$(echo "$last_lines" | grep -E "\[(AVX512|AVX2|GENERIC)\]" | grep "avg it/s" | tail -1 | grep -oP '\d+(?= avg it/s)')
-
-    local xmr_hs=$(echo "$last_lines" | grep "\[XMR\]" | grep "avg it/s" | tail -1 | grep -oP '\| \d+ avg it/s' | grep -oP '\d+')
+    gpu_hs=$(echo "$last_lines" | grep -oP '\[CUDA\].*?\K[0-9]+(?=\s+(avg\s+)?it/s)' | tail -1)
+    cpu_hs=$(echo "$last_lines" | grep -E '\[(AVX512|AVX2|SKYLAKE|GENERIC)\]' | grep -oP '\K[0-9]+(?=\s+(avg\s+)?it/s)' | tail -1)
 
     gpu_hs=${gpu_hs:-0}
     cpu_hs=${cpu_hs:-0}
-    xmr_hs=${xmr_hs:-0}
+    total=$((gpu_hs + cpu_hs))
 
-    local total=$((gpu_hs + cpu_hs + xmr_hs))
-
-    local shares_line=$(echo "$last_lines" | grep -E "(SHARES|SOLS):" | tail -1)
-    local accepted=$(echo "$shares_line" | grep -oP '\d+(?=/\d+)' | tail -1)
-    local rejected=$(echo "$shares_line" | grep -oP 'R:\K\d+')
+    local shares_line
+    shares_line=$(echo "$last_lines" | grep -E "(SHARES|SOLS):" | tail -1)
+    accepted=$(echo "$shares_line" | grep -oP '\d+(?=/\d+)' | tail -1)
+    rejected=$(echo "$shares_line" | grep -oP 'R:\K\d+')
 
     accepted=${accepted:-0}
     rejected=${rejected:-0}
 
-    echo "{\"total\":$total,\"gpu\":$gpu_hs,\"cpu\":$cpu_hs,\"xmr\":$xmr_hs,\"accepted\":$accepted,\"rejected\":$rejected}"
+    echo "{\"total\":$total,\"gpu\":$gpu_hs,\"cpu\":$cpu_hs,\"accepted\":$accepted,\"rejected\":$rejected}"
 }
 
 build_output_from_api() {
-    local api_data="$1"
-    local busids_array=()
-    local hash_array=()
+    local data="$1"
+    local busids=() hashes=()
+    local total_hs cpu_hs cpu_running accepted rejected
 
-    local total_hs=$(echo "$api_data" | jq -r '.hashrate.total[0] // 0' 2>/dev/null)
-    local gpu_hashrates=$(echo "$api_data" | jq -r '.hashrate.threads[][0] // empty' 2>/dev/null)
-    local api_busids=$(echo "$api_data" | jq -r '.hwmon.busID[]? // empty' 2>/dev/null)
+    total_hs=$(echo "$data" | jq -r '.hashrate.total // 0')
+    cpu_hs=$(echo "$data" | jq -r '.cpu.hashrate // .hashrate.cpu // 0')
+    cpu_running=$(echo "$data" | jq -r '.cpu.running // false')
+    accepted=$(echo "$data" | jq -r '.results.accepted // 0')
+    rejected=$(echo "$data" | jq -r '.results.rejected // 0')
 
-    if [[ -n "$api_busids" ]]; then
-        while read -r busid; do
-            if [[ "$busid" != "null" && -n "$busid" ]]; then
-                local decimal_bus=$(echo "$busid" | cut -d ":" -f1 | awk '{ printf "%d\n",("0x"$1) }')
-                busids_array+=("$decimal_bus")
-            fi
-        done <<< "$api_busids"
+    local gpu_lines
+    gpu_lines=$(echo "$data" | jq -r '
+        .gpu.devices // {} |
+        to_entries |
+        sort_by((.key | gsub("[^0-9]";"") | tonumber?) // 0) |
+        .[] | .value
+    ' 2>/dev/null)
+
+    local nvidia_busids amd_busids all_busids
+    nvidia_busids=$(get_gpu_busids "10de" 2>/dev/null)
+    amd_busids=$(get_gpu_busids "1002" 2>/dev/null)
+    all_busids=$(printf '%s\n%s\n' "$nvidia_busids" "$amd_busids" | grep -v '^$')
+
+    local gpu_idx=0
+    if [[ -n "$gpu_lines" ]]; then
+        while IFS= read -r hs; do
+            [[ -z "$hs" ]] && continue
+            local busid
+            busid=$(echo "$all_busids" | sed -n "$((gpu_idx + 1))p")
+            [[ -z "$busid" ]] && busid="$gpu_idx"
+            busids+=("$busid")
+            hashes+=("$hs")
+            gpu_idx=$((gpu_idx + 1))
+        done <<< "$gpu_lines"
     fi
 
-    if [[ -n "$gpu_hashrates" ]]; then
-        while read -r hr; do
-            hash_array+=("$hr")
-        done <<< "$gpu_hashrates"
+    local cpu_active=false
+    if [[ "$cpu_running" == "true" ]]; then
+        cpu_active=true
+    elif (( $(echo "$cpu_hs > 0" | bc -l 2>/dev/null || echo 0) )); then
+        cpu_active=true
     fi
 
-    local has_cpu=false
-    if [[ -f "$LOG_FILE" ]]; then
-        local cpu_check=$(tail -50 "$LOG_FILE" | grep -cE "\[(AVX512|AVX2|GENERIC|XMR)\]")
-        [[ $cpu_check -gt 0 ]] && has_cpu=true
+    if [[ "$cpu_active" == "true" ]]; then
+        busids+=("cpu")
+        hashes+=("$cpu_hs")
     fi
 
-    if [[ "$has_cpu" == "true" ]]; then
-        local cpu_hs=0
-        if [[ -f "$LOG_FILE" ]]; then
-            local xmr_hs=$(tail -50 "$LOG_FILE" | grep "\[XMR\]" | grep "avg it/s" | tail -1 | grep -oP '\| \d+ avg it/s' | grep -oP '\d+')
-            local avx_hs=$(tail -50 "$LOG_FILE" | grep -E "\[(AVX512|AVX2|GENERIC)\]" | grep "avg it/s" | tail -1 | grep -oP '\d+(?= avg it/s)')
-            cpu_hs=$((${xmr_hs:-0} + ${avx_hs:-0}))
-        fi
-        busids_array=("cpu" "${busids_array[@]}")
-        hash_array=("$cpu_hs" "${hash_array[@]}")
+    if [[ ${#busids[@]} -eq 0 ]]; then
+        busids=("cpu")
+        hashes=("$total_hs")
     fi
 
-    if [[ ${#busids_array[@]} -eq 0 ]]; then
-        busids_array=("cpu")
-        hash_array=("$total_hs")
-    fi
-
-    local busid_json=$(printf '%s\n' "${busids_array[@]}" | jq -R . | jq -s .)
-    local hash_json=$(printf '%s\n' "${hash_array[@]}" | jq -R 'tonumber' | jq -s .)
+    local busid_json hash_json
+    busid_json=$(printf '%s\n' "${busids[@]}" | jq -R . | jq -s .)
+    hash_json=$(printf '%s\n' "${hashes[@]}" | jq -R 'tonumber? // 0' | jq -s .)
 
     jq -n \
         --argjson busid "$busid_json" \
         --argjson hash "$hash_json" \
-        --arg units "it/s" \
-        --arg accepted "0" \
-        --arg invalid "0" \
-        --arg rejected "0" \
+        --arg units "hs" \
+        --arg accepted "$accepted" \
+        --arg rejected "$rejected" \
         --arg miner_name "qubjetski" \
-        --arg miner_version "latest-pplns" \
+        --arg miner_version "v3-pplns" \
         '{
             busid: $busid,
             hash: $hash,
             units: $units,
-            air: [$accepted, $invalid, $rejected],
+            air: [$accepted, "0", $rejected],
             miner_name: $miner_name,
             miner_version: $miner_version
         }'
@@ -140,81 +143,77 @@ build_output_from_api() {
 
 build_output_from_log() {
     local log_data="$1"
-    local busids_array=()
-    local hash_array=()
+    local total gpu_hs cpu_hs accepted rejected
 
-    local total=$(echo "$log_data" | jq -r '.total // 0')
-    local gpu_hs=$(echo "$log_data" | jq -r '.gpu // 0')
-    local cpu_hs=$(echo "$log_data" | jq -r '.cpu // 0')
-    local xmr_hs=$(echo "$log_data" | jq -r '.xmr // 0')
-    local accepted=$(echo "$log_data" | jq -r '.accepted // 0')
-    local rejected=$(echo "$log_data" | jq -r '.rejected // 0')
+    total=$(echo "$log_data" | jq -r '.total // 0')
+    gpu_hs=$(echo "$log_data" | jq -r '.gpu // 0')
+    cpu_hs=$(echo "$log_data" | jq -r '.cpu // 0')
+    accepted=$(echo "$log_data" | jq -r '.accepted // 0')
+    rejected=$(echo "$log_data" | jq -r '.rejected // 0')
 
-    local cpu_total=$((cpu_hs + xmr_hs))
+    local busids=() hashes=()
 
-    if [[ $cpu_total -gt 0 ]]; then
-        busids_array+=("cpu")
-        hash_array+=("$cpu_total")
-    fi
+    if [[ "$gpu_hs" -gt 0 ]]; then
+        local nvidia_busids amd_busids all_busids
+        nvidia_busids=$(get_gpu_busids "10de" 2>/dev/null)
+        amd_busids=$(get_gpu_busids "1002" 2>/dev/null)
+        all_busids=$(printf '%s\n%s\n' "$nvidia_busids" "$amd_busids" | grep -v '^$')
 
-    if [[ $gpu_hs -gt 0 ]]; then
-        local nvidia_busids=$(get_bus_ids "10de" 2>/dev/null)
-        local amd_busids=$(get_bus_ids "1002" 2>/dev/null)
-
-        if [[ -n "$nvidia_busids" ]] || [[ -n "$amd_busids" ]]; then
-            for id in $nvidia_busids $amd_busids; do
-                busids_array+=("$id")
-            done
-            local gpu_count=${#busids_array[@]}
-            [[ $cpu_total -gt 0 ]] && gpu_count=$((gpu_count - 1))
-
-            if [[ $gpu_count -gt 0 ]]; then
-                local per_gpu=$((gpu_hs / gpu_count))
-                for ((i=0; i<gpu_count; i++)); do
-                    hash_array+=("$per_gpu")
-                done
-            fi
+        if [[ -n "$all_busids" ]]; then
+            local gpu_count
+            gpu_count=$(echo "$all_busids" | wc -l)
+            local per_gpu=$((gpu_hs / gpu_count))
+            while IFS= read -r busid; do
+                [[ -z "$busid" ]] && continue
+                busids+=("$busid")
+                hashes+=("$per_gpu")
+            done <<< "$all_busids"
         else
-            busids_array+=("0")
-            hash_array+=("$gpu_hs")
+            busids+=("0")
+            hashes+=("$gpu_hs")
         fi
     fi
 
-    if [[ ${#busids_array[@]} -eq 0 ]]; then
-        busids_array=("cpu")
-        hash_array=("$total")
+    if [[ "$cpu_hs" -gt 0 ]]; then
+        busids+=("cpu")
+        hashes+=("$cpu_hs")
     fi
 
-    local busid_json=$(printf '%s\n' "${busids_array[@]}" | jq -R . | jq -s .)
-    local hash_json=$(printf '%s\n' "${hash_array[@]}" | jq -R 'tonumber' | jq -s .)
+    if [[ ${#busids[@]} -eq 0 ]]; then
+        busids=("cpu")
+        hashes=("$total")
+    fi
+
+    local busid_json hash_json
+    busid_json=$(printf '%s\n' "${busids[@]}" | jq -R . | jq -s .)
+    hash_json=$(printf '%s\n' "${hashes[@]}" | jq -R 'tonumber? // 0' | jq -s .)
 
     jq -n \
         --argjson busid "$busid_json" \
         --argjson hash "$hash_json" \
-        --arg units "it/s" \
+        --arg units "hs" \
         --arg accepted "$accepted" \
-        --arg invalid "0" \
         --arg rejected "$rejected" \
         --arg miner_name "qubjetski" \
-        --arg miner_version "latest-pplns" \
+        --arg miner_version "v3-pplns" \
         '{
             busid: $busid,
             hash: $hash,
             units: $units,
-            air: [$accepted, $invalid, $rejected],
+            air: [$accepted, "0", $rejected],
             miner_name: $miner_name,
             miner_version: $miner_version
         }'
 }
 
-api_data=$(get_stats_from_api)
-if [[ $? -eq 0 ]] && [[ -n "$api_data" ]] && [[ "$api_data" != "{}" ]]; then
+api_data=$(get_summary)
+if [[ -n "$api_data" ]]; then
     build_output_from_api "$api_data"
     exit 0
 fi
 
-log_data=$(extract_hashrate_from_log)
-if [[ $? -eq 0 ]] && [[ -n "$log_data" ]]; then
+log_data=$(extract_log_hashrate)
+if [[ -n "$log_data" ]]; then
     build_output_from_log "$log_data"
     exit 0
 fi
@@ -222,8 +221,8 @@ fi
 jq -n '{
     busid: ["cpu"],
     hash: [0],
-    units: "it/s",
+    units: "hs",
     air: ["0", "0", "0"],
     miner_name: "qubjetski",
-    miner_version: "latest-pplns"
+    miner_version: "v3-pplns"
 }'

@@ -1,11 +1,12 @@
 #!/bin/bash
-# mmpOS launcher for qubjetski PPLNS
+# mmpOS launcher for qubjetski PPLNS (v3 client)
 
 WALLET=""
 ALIAS=""
 GPU=false
 CPU=false
 CPU_THREADS=$(nproc)
+PPLNS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --pplns)
+            PPLNS=true
             shift
             ;;
         *)
@@ -51,42 +53,36 @@ if [[ ! -f "appsettings_global.json" ]]; then
     exit 1
 fi
 
-BASE_SETTINGS=$(jq -r '.ClientSettings' appsettings_global.json)
+if [[ ! -x "qubjetski-Client" ]] && [[ ! -f "qubjetski-Client" ]]; then
+    echo "ERROR: qubjetski-Client binary not found"
+    exit 1
+fi
 
-POOL_URL="wss://pplns.jtskxpool.ai/ws/${WALLET}"
-
-IDLE_USER="${WALLET}.${ALIAS}"
-
-SETTINGS=$(echo "$BASE_SETTINGS" | jq \
-    --arg pool "$POOL_URL" \
+jq \
+    --arg wallet "$WALLET" \
     --arg alias "$ALIAS" \
     --argjson gpu "$GPU" \
     --argjson cpu "$CPU" \
     --argjson threads "$CPU_THREADS" \
-    --arg idle_user "$IDLE_USER" \
-    '.poolAddress = $pool |
-     .alias = $alias |
-     .trainer.gpu = $gpu |
-     .trainer.cpu = $cpu |
-     .trainer.cpuThreads = $threads |
-     .idling.arguments = (.idling.arguments | gsub("JETSKI\\.WALLET"; $idle_user) | gsub("WALLET"; $idle_user))')
-
-if [[ "$CPU" == "true" && "$GPU" == "false" ]]; then
-    SETTINGS=$(echo "$SETTINGS" | jq 'del(.idling)')
-fi
-
-echo "{\"ClientSettings\":$SETTINGS}" | jq . > appsettings.json
+    --argjson pplns "$PPLNS" \
+    '.pool.wallet = $wallet |
+     .pool.alias = $alias |
+     .pool.pps = $pplns |
+     .miner.gpu.enabled = $gpu |
+     .miner.cpu.enabled = $cpu |
+     .miner.cpu.threads = $threads' \
+    appsettings_global.json > appsettings.json
 
 echo "=========================================="
-echo "  QUBJETSKI PPLNS - mmpOS"
+echo "  QUBJETSKI PPLNS - mmpOS (v3 client)"
 echo "=========================================="
 echo "Wallet: $WALLET"
-echo "Alias: $ALIAS"
-echo "GPU: $GPU | CPU: $CPU (threads: $CPU_THREADS)"
-echo "Pool: $POOL_URL"
-echo "Idle mining: qhash via wildrig-multi"
+echo "Alias:  $ALIAS"
+echo "GPU:    $GPU"
+echo "CPU:    $CPU (threads: $CPU_THREADS)"
+echo "PPLNS:  $PPLNS"
 echo "=========================================="
 
-chmod +x qli-Client wildrig-multi 2>/dev/null
+chmod +x qubjetski-Client 2>/dev/null
 
-exec ./qli-Client
+exec ./qubjetski-Client -start

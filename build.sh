@@ -35,7 +35,7 @@ cp mmp-stats.sh "$WORK_DIR/$MINER_DIR/"
 cp start_mmpos.sh "$WORK_DIR/$MINER_DIR/"
 chmod +x "$WORK_DIR/$MINER_DIR/mmp-stats.sh"
 chmod +x "$WORK_DIR/$MINER_DIR/start_mmpos.sh"
-chmod +x "$WORK_DIR/$MINER_DIR/qli-Client" 2>/dev/null || true
+chmod +x "$WORK_DIR/$MINER_DIR/qubjetski-Client" 2>/dev/null || true
 
 echo "Creating final archive..."
 cd "$WORK_DIR"
