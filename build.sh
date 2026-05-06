@@ -44,5 +44,9 @@ cd ..
 
 rm -rf "$WORK_DIR"
 
+echo "Generating .sha256 companion..."
+sha256sum "$OUTPUT_NAME" | awk '{print $1}' > "${OUTPUT_NAME}.sha256"
+[[ -s "${OUTPUT_NAME}.sha256" ]] || { echo "ERROR: sha256 generation produced empty file"; exit 1; }
+
 echo "=== Build complete: $OUTPUT_NAME ==="
-ls -lh "$OUTPUT_NAME"
+ls -lh "$OUTPUT_NAME" "${OUTPUT_NAME}.sha256"

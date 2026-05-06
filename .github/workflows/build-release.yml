@@ -111,6 +111,21 @@ jobs:
 
           echo "Artifact verified: $ARTIFACT (${FILE_SIZE} bytes)"
 
+          HASH_FILE="${ARTIFACT}.sha256"
+          if [ ! -s "$HASH_FILE" ]; then
+            echo "::error::Companion sha256 file missing or empty: $HASH_FILE"
+            exit 1
+          fi
+
+          DECLARED_HASH=$(cat "$HASH_FILE")
+          ACTUAL_HASH=$(sha256sum "$ARTIFACT" | awk '{print $1}')
+          if [ "$DECLARED_HASH" != "$ACTUAL_HASH" ]; then
+            echo "::error::sha256 file content does not match artifact hash"
+            exit 1
+          fi
+
+          echo "Companion sha256 verified: $DECLARED_HASH"
+
       - name: Delete existing release
         if: steps.check.outputs.changed == 'true'
         run: gh release delete latest --yes --cleanup-tag 2>/dev/null || true
@@ -148,7 +163,8 @@ jobs:
           EOF
           )" \
             --latest \
-            qubjetski-latest_mmpos.tar.gz
+            qubjetski-latest_mmpos.tar.gz \
+            qubjetski-latest_mmpos.tar.gz.sha256
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM_HASH: ${{ steps.upstream.outputs.hash }}

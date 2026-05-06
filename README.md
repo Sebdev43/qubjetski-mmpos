@@ -23,8 +23,19 @@ https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-l
 ## Features
 
 - Auto-updates daily from upstream [Jetski-Qubic-Pool](https://github.com/jtskxx/Jetski-Qubic-Pool) releases
+- Wrapper-side auto-update: rigs pull a new package on miner restart when our release changes (no profile re-import needed)
 - Includes mmpOS integration files (mmp-stats.sh, mmp-external.conf)
 - Supports CPU and GPU mining
+
+## Auto-update mechanism
+
+mmpOS caches custom miners by SHA-256 of the download URL: once the rig has the package, it never re-downloads from the same URL. To work around this, `start_mmpos.sh` does its own update check at miner restart:
+
+1. Fetches `qubjetski-latest_mmpos.tar.gz.sha256` from this repo's `latest` release (~64 bytes, short timeout)
+2. Compares to a local `.installed_hash` file
+3. If they differ: downloads the full package, verifies its hash matches, extracts it over the install directory, and re-execs itself with the same arguments
+
+Failure modes (no network, hash mismatch, extraction error) are silent and never block mining — the rig stays on the install it has. First-run on a fresh rig snapshots the current hash without applying anything.
 
 ## mmpOS Import JSON
 
