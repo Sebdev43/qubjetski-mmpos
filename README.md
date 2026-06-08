@@ -17,8 +17,10 @@ Auto-updating mmpOS package for [Jetski Qubic Pool](https://qubic.jetskipool.ai/
 ## Download URL
 
 ```
-https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz
+https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz?v=20260608
 ```
+
+The `?v=YYYYMMDD` suffix is a cache-buster for mmpOS (see [Forcing an update on existing rigs](#forcing-an-update-on-existing-rigs)). GitHub ignores the query string and serves the same file; mmpOS keys its cache on the full URL string, so bumping it forces a fresh download.
 
 ## Features
 
@@ -37,10 +39,25 @@ mmpOS caches custom miners by SHA-256 of the download URL: once the rig has the 
 
 Failure modes (no network, hash mismatch, extraction error) are silent and never block mining — the rig stays on the install it has. First-run on a fresh rig snapshots the current hash without applying anything.
 
+### Forcing an update on existing rigs
+
+mmpOS stores each custom miner in `/opt/mmp/miners/custom-<sha256(url)[0:5]>/` and **never re-downloads from a URL it already has cached**. A rig that imported an older version of this package (before the wrapper-side auto-update existed) is therefore frozen on that old copy — the self-updater isn't on it yet, so it can't pull itself forward.
+
+To bootstrap such rigs **once**, change the `custom_url` query string in the mmpOS miner profile:
+
+```
+...qubjetski-latest_mmpos.tar.gz        →  custom-54037 (old, frozen)
+...qubjetski-latest_mmpos.tar.gz?v=20260608  →  custom-62174 (new folder, fresh download)
+```
+
+Editing the profile's `custom_url` propagates to **all rigs using that profile** — on the next miner restart each one sees a new cache folder and downloads the current package (which contains the self-updater). After this one-time bump, future updates are handled automatically by `start_mmpos.sh` and **no further URL changes are needed**.
+
+No SSH required — this is a single edit in the mmpOS dashboard.
+
 ## mmpOS Import JSON
 
 ```json
-{"miner_profile":{"name":"Qubic-Jetski-PPLNS","coin":"QUBIC","os":"linux","commandline":"./start_mmpos.sh --wallet %wallet_address% --rigid %rig_name%%miner_id% --gpu --cpu --cpu-threads $(nproc) --pplns","miner":"custom","miner_version":"latest","custom_url":"https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz","api_port":0,"platforms":["cpu_intel","cpu_amd","nvidia"]},"pools":[{"url":"pplnsjetski.xyz","port":"443","username":"%wallet_address%.%rig_name%%miner_id%","password":"x","name":"Jetski-Qubic","coin":"QUBIC","ssl":true}]}
+{"miner_profile":{"name":"Qubic-Jetski-PPLNS","coin":"QUBIC","os":"linux","commandline":"./start_mmpos.sh --wallet %wallet_address% --rigid %rig_name%%miner_id% --gpu --cpu --cpu-threads $(nproc) --pplns","miner":"custom","miner_version":"latest","custom_url":"https://github.com/Sebdev43/qubjetski-mmpos/releases/download/latest/qubjetski-latest_mmpos.tar.gz?v=20260608","api_port":0,"platforms":["cpu_intel","cpu_amd","nvidia"]},"pools":[{"url":"pplnsjetski.xyz","port":"443","username":"%wallet_address%.%rig_name%%miner_id%","password":"x","name":"Jetski-Qubic","coin":"QUBIC","ssl":true}]}
 ```
 
 ## Manual Build
